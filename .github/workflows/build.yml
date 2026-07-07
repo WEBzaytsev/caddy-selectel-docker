@@ -63,11 +63,61 @@ jobs:
           echo "Updated Dockerfile with Caddy version ${VERSION}"
           cat Dockerfile
 
+      - name: Update Dockerfile with latest xcaddy module versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Каждый --with модуль пинуется явной версией (тег релиза, либо, если у
+          # репозитория нет тегов, последний коммит дефолтной ветки). Это гарантирует,
+          # что изменение версии апстрим-модуля меняет текст Dockerfile, а значит
+          # инвалидирует Docker layer-кэш именно для этого модуля — без этого BuildKit
+          # переиспользует старый xcaddy-слой навечно, и новые релизы модулей (например,
+          # caddy-dns/selectel) никогда не попадают в собранный образ.
+          MODULES=(
+            "github.com/caddy-dns/cloudflare"
+            "github.com/mholt/caddy-ratelimit"
+            "github.com/WeidiDeng/caddy-cloudflare-ip"
+            "github.com/mholt/caddy-dynamicdns"
+            "github.com/caddy-dns/selectel"
+            "github.com/caddy-dns/timeweb"
+          )
+
+          for MODULE in "${MODULES[@]}"; do
+            REPO="${MODULE#github.com/}"
+
+            VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.tag_name // empty')
+
+            if [ -z "$VERSION" ]; then
+              VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/tags" | jq -r '.[0].name // empty')
+            fi
+
+            if [ -z "$VERSION" ]; then
+              DEFAULT_BRANCH=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}" | jq -r '.default_branch // empty')
+              if [ -z "$DEFAULT_BRANCH" ]; then
+                echo "Failed to determine default branch for ${MODULE}" >&2
+                exit 1
+              fi
+              VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/commits/${DEFAULT_BRANCH}" | jq -r '.sha // empty')
+            fi
+
+            if [ -z "$VERSION" ]; then
+              echo "Failed to determine a version for ${MODULE}" >&2
+              exit 1
+            fi
+
+            ESCAPED_MODULE=$(printf '%s\n' "$MODULE" | sed -e 's/[\/&]/\\&/g')
+            sed -i.bak -E "s|--with ${ESCAPED_MODULE}@[A-Za-z0-9._-]+|--with ${MODULE}@${VERSION}|" Dockerfile
+            rm -f Dockerfile.bak
+            echo "Pinned ${MODULE} -> ${VERSION}"
+          done
+
+          cat Dockerfile
+
       - name: Commit changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git diff --quiet || (git add Dockerfile && git commit -m "chore: update Caddy to ${{ needs.get-caddy-version.outputs.version }}" && git push)
+          git diff --quiet || (git add Dockerfile && git commit -m "chore: update Caddy and xcaddy module versions" && git push)
 
   build:
     needs: get-caddy-version
@@ -87,6 +137,55 @@ jobs:
           sed -i.bak "s|FROM caddy:[0-9.]*\$|FROM caddy:${VERSION}|" Dockerfile
           rm -f Dockerfile.bak
           echo "Building with Caddy version ${VERSION}"
+
+      - name: Update Dockerfile with latest xcaddy module versions for build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Тот же бамп версий модулей, что и в update-dockerfile, но применяется
+          # непосредственно перед сборкой этого job'а. Так push/pull_request-сборки
+          # тоже используют актуальные версии модулей, а не только закоммиченные
+          # ранее update-dockerfile job'ом (который запускается лишь по schedule/
+          # workflow_dispatch).
+          MODULES=(
+            "github.com/caddy-dns/cloudflare"
+            "github.com/mholt/caddy-ratelimit"
+            "github.com/WeidiDeng/caddy-cloudflare-ip"
+            "github.com/mholt/caddy-dynamicdns"
+            "github.com/caddy-dns/selectel"
+            "github.com/caddy-dns/timeweb"
+          )
+
+          for MODULE in "${MODULES[@]}"; do
+            REPO="${MODULE#github.com/}"
+
+            VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.tag_name // empty')
+
+            if [ -z "$VERSION" ]; then
+              VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/tags" | jq -r '.[0].name // empty')
+            fi
+
+            if [ -z "$VERSION" ]; then
+              DEFAULT_BRANCH=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}" | jq -r '.default_branch // empty')
+              if [ -z "$DEFAULT_BRANCH" ]; then
+                echo "Failed to determine default branch for ${MODULE}" >&2
+                exit 1
+              fi
+              VERSION=$(curl -s -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${REPO}/commits/${DEFAULT_BRANCH}" | jq -r '.sha // empty')
+            fi
+
+            if [ -z "$VERSION" ]; then
+              echo "Failed to determine a version for ${MODULE}" >&2
+              exit 1
+            fi
+
+            ESCAPED_MODULE=$(printf '%s\n' "$MODULE" | sed -e 's/[\/&]/\\&/g')
+            sed -i.bak -E "s|--with ${ESCAPED_MODULE}@[A-Za-z0-9._-]+|--with ${MODULE}@${VERSION}|" Dockerfile
+            rm -f Dockerfile.bak
+            echo "Pinned ${MODULE} -> ${VERSION}"
+          done
+
+          cat Dockerfile
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
